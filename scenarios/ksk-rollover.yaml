@@ -1,0 +1,43 @@
+# Scenario: watch a KSK rollover from start to finish.
+#
+# With speed=60, one real minute = one virtual hour.
+# The full rollover below covers ~14 virtual days = ~5.6 real hours.
+# Drop speed to 600 for a quick sanity run (~34 real minutes).
+
+zone: example.test
+start: 2026-01-01T00:00:00
+speed: 60
+
+observe:
+  every: 30m   # virtual — sample state every 30 virtual minutes
+
+steps:
+  - after: 1h
+    description: "Zone should be signed shortly after startup"
+    assert: zone_signed
+
+  - after: 2h
+    snapshot: true
+    description: "Initial state snapshot"
+
+  # At virtual T+3d, pretend the registrar publishes our DS.
+  # BIND has been waiting on this to complete the initial KSK publication.
+  - after: 3d
+    description: "Parent registrar publishes DS record"
+    do: ds_published
+
+  # Observe the next 11 virtual days as BIND works through retire/remove
+  # phases of the initial KSK and begins its first rollover cycle.
+  - after: 11d
+    description: "Let the dnssec-policy engine run"
+    snapshot: true
+
+  # Slow the clock way down when we expect something dramatic so we can
+  # actually watch it happen.
+  - after: 1h
+    speed: 5
+    description: "Slow to 5x to watch next rollover up close"
+
+  - after: 2d
+    snapshot: true
+    description: "End of scenario snapshot"

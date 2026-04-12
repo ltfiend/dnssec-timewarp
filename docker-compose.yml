@@ -1,0 +1,27 @@
+services:
+  bind-auth:
+    build: ./docker/bind
+    container_name: dnssec-lab-auth
+    networks:
+      lab:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "15353:53/udp"    # query from host with: dig @127.0.0.1 -p 15353 ...
+      - "15353:53/tcp"
+      - "19953:953/tcp"   # rndc from orchestrator
+    volumes:
+      # Shared faketime config — orchestrator writes, BIND reads.
+      - ./runtime/faketime.rc:/opt/lab/faketime.rc:ro
+      # Zone data and key state files, so we can inspect them from the host.
+      - ./runtime/bind-data:/var/lib/bind
+      - ./runtime/bind-logs:/var/log/bind
+      - ./docker/bind/named.conf:/etc/bind/named.conf:ro
+      - ./docker/bind/example.test.db:/var/lib/bind/example.test.db:ro
+      - ./runtime/rndc.key:/etc/bind/rndc.key:ro
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
