@@ -1,0 +1,62 @@
+# Scenario: watch a ZSK rollover driven entirely by dnssec-policy.
+#
+# ZSK rollovers don't involve the parent (no DS record changes), so BIND
+# handles the full lifecycle autonomously.  With lab-fast policy:
+#   ZSK lifetime = P30D, with x100 speed that's ~7.2 real hours.
+#
+# This scenario uses x120 so 30 virtual days = 6 real hours.  We slow
+# down to x10 around the expected rollover point to watch the pre-publish
+# and post-publish phases in detail.
+
+zone: example.test
+start: 2026-01-01T00:00:00
+speed: 120
+
+observe:
+  every: 15m   # virtual — sample state every 15 virtual minutes
+
+steps:
+  - after: 30m
+    description: "Zone should be signed shortly after startup"
+    assert: zone_signed
+
+  - after: 30m
+    snapshot: true
+    description: "Initial state — single ZSK active"
+
+  # Tell BIND the parent DS is published so it can complete KSK setup.
+  # Without this, BIND keeps waiting and won't fully activate the KSK,
+  # which can block subsequent operations.
+  - after: 1d
+    description: "Publish DS at parent so KSK setup completes"
+    do: ds_published
+
+  # Fast-forward through the first ~25 days.  The ZSK was generated at
+  # startup with a 30-day lifetime, so we expect pre-publish of the
+  # successor around day 25-27.
+  - after: 24d
+    description: "Approaching ZSK rollover — two ZSKs should appear soon"
+    snapshot: true
+
+  # Slow down to watch the new ZSK appear and the old one retire.
+  - after: 0d
+    speed: 10
+    description: "Slow to 10x to watch the ZSK rollover"
+
+  - after: 4d
+    description: "New ZSK should be published (pre-publish phase)"
+    assert: two_zsks_present
+
+  - after: 3d
+    description: "Old ZSK should be removed, back to one active ZSK"
+    snapshot: true
+
+  # Speed back up and run past a second rollover cycle.
+  - after: 0d
+    speed: 120
+    description: "Speed back up to 120x"
+
+  - after: 30d
+    description: "Second ZSK rollover cycle complete"
+    snapshot: true
+    assert: zone_signed

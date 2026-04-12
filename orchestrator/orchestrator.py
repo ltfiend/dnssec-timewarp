@@ -140,19 +140,27 @@ class BindController:
         self.rndc_key = rndc_key
         self.log_dir = log_dir
 
-    def rndc(self, *args: str, timeout: float = 10.0) -> str:
+    def rndc(self, *args: str, timeout: float = 10.0, retries: int = 0) -> str:
         cmd = [
             "rndc", "-s", self.host, "-p", str(self.rndc_port),
             "-k", str(self.rndc_key), *args,
         ]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"rndc failed ({result.returncode}): {result.stderr.strip()}"
-            )
-        return result.stdout
+        last_err = None
+        for attempt in range(1 + retries):
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"rndc failed ({result.returncode}): {result.stderr.strip()}"
+                    )
+                return result.stdout
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(1)
+        raise last_err  # type: ignore[misc]
 
     def dig(self, qname: str, qtype: str, timeout: float = 5.0) -> str:
         cmd = [
@@ -330,7 +338,7 @@ class ScenarioRunner:
             return
         self._last_obs_virtual = virtual_now
         try:
-            raw = self.bind.dnssec_status(self.zone)
+            raw = self.bind.rndc("dnssec", "-status", self.zone, retries=2)
         except Exception as e:
             self.record("sample_error", str(e))
             return
@@ -390,6 +398,7 @@ class ScenarioRunner:
             out = self.bind.checkds_published(self.zone)
             self.record("rndc_output", out.strip())
         elif action == "ds_withdrawn":
+            self.record("action", "telling BIND: parent DS is withdrawn")
             out = self.bind.checkds_withdrawn(self.zone)
             self.record("rndc_output", out.strip())
         elif action == "rollover_ksk":
@@ -398,7 +407,17 @@ class ScenarioRunner:
             ksks = [k for k in keys if k["role"] == "KSK"]
             if not ksks:
                 raise RuntimeError("no KSK found to roll")
+            self.record("action", f"triggering KSK rollover (key {ksks[0]['id']})")
             out = self.bind.rollover(self.zone, ksks[0]["id"])
+            self.record("rndc_output", out.strip())
+        elif action == "rollover_zsk":
+            keys = self.bind.parse_dnssec_status(
+                self.bind.dnssec_status(self.zone))
+            zsks = [k for k in keys if k["role"] == "ZSK"]
+            if not zsks:
+                raise RuntimeError("no ZSK found to roll")
+            self.record("action", f"triggering ZSK rollover (key {zsks[0]['id']})")
+            out = self.bind.rollover(self.zone, zsks[0]["id"])
             self.record("rndc_output", out.strip())
         elif action == "reload":
             self.record("rndc_output", self.bind.rndc("reload").strip())
@@ -422,6 +441,23 @@ class ScenarioRunner:
             )
         elif assertion == "two_ksks_present":
             ok = sum(1 for k in keys if k["role"] == "KSK") >= 2
+            detail = f"{sum(1 for k in keys if k['role'] == 'KSK')} KSKs present"
+        elif assertion == "two_zsks_present":
+            ok = sum(1 for k in keys if k["role"] == "ZSK") >= 2
+            detail = f"{sum(1 for k in keys if k['role'] == 'ZSK')} ZSKs present"
+        elif assertion == "one_ksk_present":
+            ok = sum(1 for k in keys if k["role"] == "KSK") == 1
+            detail = f"{sum(1 for k in keys if k['role'] == 'KSK')} KSKs present"
+        elif assertion == "zsk_active":
+            ok = any(
+                k["role"] == "ZSK"
+                and k["states"].get("zone signing", {}).get("value") == "yes"
+                for k in keys
+            )
+        elif assertion == "cds_present":
+            cds = self.bind.dig(self.zone, "CDS")
+            ok = "CDS" in cds and "RRSIG" in cds
+            detail = "CDS published" if ok else "no CDS record"
         else:
             raise ValueError(f"unknown assertion: {assertion}")
         self.record("assert", {

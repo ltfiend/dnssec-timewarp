@@ -69,8 +69,29 @@ steps:
 ```
 
 Available `do:` actions: `ds_published`, `ds_withdrawn`, `rollover_ksk`,
-`reload`. Available `assert:` checks: `zone_signed`, `ksk_active`,
-`two_ksks_present`. Add your own in `orchestrator.py`.
+`rollover_zsk`, `reload`. Available `assert:` checks: `zone_signed`,
+`ksk_active`, `zsk_active`, `two_ksks_present`, `two_zsks_present`,
+`one_ksk_present`, `cds_present`. Add your own in `orchestrator.py`.
+
+## Included scenarios
+
+| Scenario | File | What it shows | Real time @ default speed |
+|---|---|---|---|
+| KSK rollover | `scenarios/ksk-rollover.yaml` | Full KSK lifecycle via `dnssec-policy`, DS publication | ~5.6h @ x60 |
+| ZSK rollover | `scenarios/zsk-rollover.yaml` | Automatic ZSK rotation (no DS involvement) | ~8.5h @ x120 |
+| Manual rollover | `scenarios/manual-rollover.yaml` | Operator-triggered KSK roll, DS publish/withdraw | ~3.5h @ x100 |
+
+## Analyzing results
+
+After a run completes, `observations/timeline.jsonl` contains every
+observation keyed by both virtual and real time.
+
+```
+make timeline           # full event log with color
+make timeline-keys      # just key state transitions
+make timeline-summary   # statistical summary
+python3 tools/timeline.py --json   # raw JSON for scripting
+```
 
 ## Gotchas
 

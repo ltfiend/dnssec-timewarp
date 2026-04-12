@@ -4,7 +4,7 @@
 RUNTIME := runtime
 SCENARIO ?= scenarios/ksk-rollover.yaml
 
-.PHONY: init build up down run logs shell clean
+.PHONY: init build up down run logs shell clean timeline
 
 init:
 	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs observations
@@ -37,6 +37,15 @@ logs:
 
 shell:
 	docker compose exec bind-auth bash
+
+timeline:
+	python3 tools/timeline.py
+
+timeline-keys:
+	python3 tools/timeline.py --keys-only
+
+timeline-summary:
+	python3 tools/timeline.py --summary
 
 clean: down
 	rm -rf $(RUNTIME) observations

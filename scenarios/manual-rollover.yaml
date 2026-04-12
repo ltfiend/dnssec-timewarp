@@ -1,0 +1,65 @@
+# Scenario: manually trigger a KSK rollover and shepherd it through
+# DS publication at the parent.
+#
+# This is the most operationally realistic scenario: you decide to roll
+# your KSK, BIND generates a successor, you publish the new DS at the
+# parent, and eventually the old KSK is withdrawn.
+#
+# Speed x100: 1 real minute = 100 virtual minutes ≈ 1.67 virtual hours.
+
+zone: example.test
+start: 2026-01-01T00:00:00
+speed: 100
+
+observe:
+  every: 15m
+
+steps:
+  # Let BIND start up and sign the zone.
+  - after: 1h
+    assert: zone_signed
+    description: "Zone is signed"
+
+  # Publish DS so the initial KSK is fully active.
+  - after: 1d
+    do: ds_published
+    description: "Publish initial DS at parent"
+
+  - after: 2h
+    assert: ksk_active
+    snapshot: true
+    description: "Initial KSK is fully active"
+
+  # Now trigger a manual KSK rollover.
+  - after: 1d
+    do: rollover_ksk
+    description: "Manually trigger KSK rollover"
+
+  # Slow down to watch the double-KSK period.
+  - after: 0d
+    speed: 20
+    description: "Slow to 20x to observe rollover mechanics"
+
+  - after: 2d
+    description: "Two KSKs should be present during rollover"
+    assert: two_ksks_present
+    snapshot: true
+
+  # Simulate the registrar publishing the new DS and withdrawing the old.
+  - after: 1d
+    do: ds_published
+    description: "Publish successor DS at parent"
+
+  - after: 1d
+    do: ds_withdrawn
+    description: "Withdraw old DS at parent"
+
+  # Let BIND finish cleanup.
+  - after: 5d
+    speed: 100
+    description: "Speed back up for cleanup phase"
+
+  - after: 10d
+    snapshot: true
+    description: "Final state — old KSK should be removed"
+    assert: ksk_active
