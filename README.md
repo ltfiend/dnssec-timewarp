@@ -69,18 +69,106 @@ every command would fail "clock skew". Socket timeouts under libfaketime
 scale with the speed multiplier, so the orchestrator passes generous
 timeouts.
 
-## Usage
+## Prerequisites
+
+- **Docker** (Engine ≥ 20.10) with the `compose` plugin — `docker compose`
+  must work.
+- **Python 3.10+** on the host with PyYAML:
+  `pip install -r requirements.txt` (or `pip install pyyaml`).
+- **BIND utilities on the host** are NOT required. `rndc` and `dig` run
+  inside the container; the host only runs `orchestrator.py`.
+- **Network access during build.** The Dockerfile downloads BIND source
+  from `downloads.isc.org` and clones libfaketime from GitHub. If your
+  environment blocks outbound HTTPS, mirror these locally and rewrite
+  the URLs in `docker/bind/Dockerfile`.
+- **Disk.** The first-stage build image is ~1 GB (full BIND build deps).
+  The final runtime image is ~200 MB.
+
+## First-time build and smoke test
+
+The commands below reproduce the exact run that was verified working.
+Each step explains what should happen so you can tell where it fails.
+
+```bash
+# 1. Create runtime directories and a placeholder faketime.rc + rndc.key.
+#    `make init` writes runtime/faketime.rc, and pulls a throwaway Debian
+#    container just to run `rndc-confgen` so the key format matches what
+#    the in-container rndc expects.
+make init
+
+# 2. Build the container image. This is the long step (3-8 minutes on a
+#    warm system). It compiles BIND 9.18.47 from source with
+#    --without-jemalloc (to avoid the jemalloc/libfaketime deadlock), then
+#    compiles libfaketime v0.9.11 from source (Debian's 0.9.10 has a
+#    clock_gettime() reentrancy bug). Multi-stage, so the final image
+#    doesn't carry the build toolchain.
+make build        # or: docker compose build
+
+# 3. Start BIND. With just `make up` this combines init + build + up;
+#    since you already did init/build, `docker compose up -d` is enough.
+docker compose up -d
+
+# 4. Verify named actually started under libfaketime. You should see a
+#    BIND banner with virtual-time timestamps (2025/2026 dates), key
+#    generation messages for KSK and ZSK, and "all zones loaded".
+docker compose logs | tail -30
+
+# 5. Run the smoke test (~30 real seconds at x60). This validates the
+#    full pipeline: time warp, TSIG via docker-exec'd rndc, dnssec-policy
+#    key generation, and scenario assertions.
+python3 orchestrator/orchestrator.py scenarios/smoke.yaml
+
+# 6. Inspect results.
+python3 tools/timeline.py --summary
+```
+
+Expected smoke-test output (last line of each step should match shape):
 
 ```
-make up                             # build + start BIND
+[virtual 2026-01-01 00:00:07] scenario_start
+[virtual 2026-01-01 00:05:13] key_state_change
+[virtual 2026-01-01 00:05:25] assert   zone_signed  passed
+[virtual 2026-01-01 00:15:39] assert   ksk_active   passed
+[virtual 2026-01-01 00:25:52] assert   zsk_active   passed
+[virtual 2026-01-01 00:31:12] snapshot
+[virtual 2026-01-01 00:31:12] scenario_end
+```
+
+If all three assertions pass, the lab is fully working. You can then run
+the longer scenarios below.
+
+## Running scenarios
+
+```
 make run SCENARIO=scenarios/ksk-rollover.yaml
-make logs                           # tail dnssec log
+make logs                           # tail dnssec log (virtual timestamps)
 make down
 ```
 
 Live output during a run shows every key-state transition keyed by virtual
 time. Full timeline lands in `observations/timeline.jsonl` for post-hoc
 analysis.
+
+## Resetting BIND state between runs
+
+BIND writes zone and key state under `runtime/bind-data/` (owned by the
+container's `bind` user, uid 107 in the image). Because those files are
+owned inside the container, you can't `rm -rf runtime/` from the host
+without sudo. Use a throwaway container instead:
+
+```bash
+docker compose down
+docker run --rm -v "$PWD/runtime:/runtime" debian:bookworm-slim \
+    sh -c 'rm -rf /runtime/bind-data/* /runtime/bind-logs/*'
+echo "@2026-01-01 00:00:00 x1" > runtime/faketime.rc
+rm -f observations/timeline.jsonl
+docker compose up -d
+```
+
+`make clean` will try to remove `runtime/` with a plain `rm -rf` and will
+fail with `Permission denied` on the container-owned files. Either edit
+the Makefile to run the removal inside a container, or use `sudo rm -rf
+runtime observations` as an escape hatch.
 
 ## Scenario DSL
 
@@ -125,6 +213,64 @@ make timeline-keys      # just key state transitions
 make timeline-summary   # statistical summary
 python3 tools/timeline.py --json   # raw JSON for scripting
 ```
+
+## Troubleshooting
+
+Specific failure modes that were encountered and diagnosed while bringing
+the lab up. If you see one of these, here's what it means.
+
+**Build fails on `./configure --without-jemalloc`: "configure: error:
+<some library> not found".**
+One of BIND's build deps is missing. The Dockerfile installs the full
+set for 9.18.47. If you bumped `BIND_VERSION`, newer BINDs may need
+additional libraries — check the build-deps list in stage 1 of
+`docker/bind/Dockerfile` against the upstream BIND release notes.
+
+**Build fails downloading BIND: "HTTP/2 404" or "SSL error".**
+ISC sometimes restructures `downloads.isc.org` paths. Check whether
+`https://downloads.isc.org/isc/bind9/${BIND_VERSION}/bind-${BIND_VERSION}.tar.xz`
+actually exists for your chosen version. Released versions are stable;
+dev/snapshot versions move around.
+
+**`libfaketime: Unexpected recursive calls to clock_gettime() without
+proper initialization.`**
+You're on libfaketime 0.9.10. Make sure `LIBFAKETIME_REF` in the
+Dockerfile is `v0.9.11` or later and that the container built the
+from-source version (check `ls /opt/faketime/lib/faketime/` in the
+image should show two `.so.1` files).
+
+**`named` container starts but produces no output, and `dig` times out.**
+Almost always the jemalloc deadlock: named is hung in `futex_wait`
+before printing its banner. Verify you built *with* `--without-jemalloc`:
+`docker run --rm dnssec-timewarp-bind-auth:latest /usr/sbin/named -V |
+head -3` should show the configure line including `'--without-jemalloc'`.
+
+**`rndc: connection to remote host closed ... clocks are not
+synchronized`.**
+TSIG skew. Either you're running rndc from the host over TCP (don't —
+use `make rndc ARGS='…'` or `docker compose exec`), or the orchestrator's
+ticker isn't updating `runtime/faketime.rc`. Check that the mtime of
+that file is within the last second:
+`stat -c '%Y %n' runtime/faketime.rc; date +%s`.
+
+**`named.conf:41: undefined category: 'dnssec-policy'`.**
+You're on BIND < 9.19. The `dnssec-policy` log category was split out
+in 9.19. On 9.18, those messages land in the `dnssec` category, which
+the current `named.conf` already routes correctly.
+
+**`zone 'example.test': empty 'parental-agents' entry`.**
+BIND 9.18 rejects an empty `parental-agents { };` block as a syntax
+error. Omit the block entirely — BIND treats the absence as "no
+parental agents configured", which is what we want for manual
+`rndc dnssec -checkds` control.
+
+**`rm: cannot remove 'runtime/bind-data/...': Permission denied`.**
+Those files are owned by the container's `bind` user. Use the
+throwaway-container recipe in "Resetting BIND state" above.
+
+**`dig: src/unix/udp.c:292: uv__udp_recvmsg: Assertion ... failed`.**
+A host-side libuv/dig bug, not related to this lab. Retry; it's
+transient.
 
 ## Gotchas
 
