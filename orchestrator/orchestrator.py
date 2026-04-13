@@ -280,24 +280,37 @@ def _parse_duration(s: str) -> dt.timedelta:
             raise ValueError(f"bad ISO duration: {s}")
         d, h, mi, se = (int(x) if x else 0 for x in m.groups())
         return dt.timedelta(days=d, hours=h, minutes=mi, seconds=se)
+    matches = re.findall(r"(\d+)([dhms])", s)
+    if not matches:
+        raise ValueError(f"bad duration: {s}")
     total = dt.timedelta()
-    for num, unit in re.findall(r"(\d+)([dhms])", s):
+    for num, unit in matches:
         total += {
             "d": dt.timedelta(days=int(num)),
             "h": dt.timedelta(hours=int(num)),
             "m": dt.timedelta(minutes=int(num)),
             "s": dt.timedelta(seconds=int(num)),
         }[unit]
-    if total == dt.timedelta():
-        raise ValueError(f"bad duration: {s}")
     return total
+
+
+def _coerce_datetime(v: Any) -> dt.datetime:
+    """Accept either an ISO-8601 string or a datetime (PyYAML auto-parses
+    unquoted timestamps into datetime). Always return a naive datetime."""
+    if isinstance(v, dt.datetime):
+        return v.replace(tzinfo=None)
+    if isinstance(v, dt.date):
+        return dt.datetime(v.year, v.month, v.day)
+    if isinstance(v, str):
+        return dt.datetime.fromisoformat(v.replace("Z", "+00:00")).replace(tzinfo=None)
+    raise ValueError(f"cannot interpret {v!r} as datetime")
 
 
 def _parse_virtual_target(spec: str | dict, clock: VirtualClock) -> dt.datetime:
     """Resolve a scenario step's time spec to an absolute virtual datetime."""
     if isinstance(spec, dict):
         if "at" in spec:
-            return dt.datetime.fromisoformat(spec["at"].replace("Z", "+00:00")).replace(tzinfo=None)
+            return _coerce_datetime(spec["at"])
         if "after" in spec:
             return clock.virtual_now() + _parse_duration(spec["after"])
     raise ValueError(f"step needs 'at' or 'after': {spec}")
@@ -489,8 +502,9 @@ def main(argv: list[str]) -> int:
 
     scenario = yaml.safe_load(args.scenario.read_text())
 
-    start_str = scenario.get("start", "2026-01-01T00:00:00")
-    start = dt.datetime.fromisoformat(start_str.replace("Z", "+00:00")).replace(tzinfo=None)
+    # PyYAML auto-parses ISO8601 timestamps into datetime objects, so accept either.
+    start_raw = scenario.get("start", "2026-01-01T00:00:00")
+    start = _coerce_datetime(start_raw)
     speed = float(scenario.get("speed", 60))
 
     clock = VirtualClock(args.rc, start=start, speed=speed)
