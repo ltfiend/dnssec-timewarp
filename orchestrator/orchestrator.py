@@ -35,6 +35,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -69,15 +70,38 @@ class TimeSegment:
 
 
 class VirtualClock:
-    """Owns the shared faketime.rc file and the current segment."""
+    """Owns the shared faketime.rc file and the current segment.
 
-    def __init__(self, rc_path: pathlib.Path, start: dt.datetime, speed: float):
+    Background ticker
+    -----------------
+    libfaketime's `@TIMESTAMP xSPEED` format anchors virtual time at
+    @TIMESTAMP at the moment the config is read. Long-lived processes
+    (named) read it once and compute virtual_now correctly from there.
+    But short-lived processes (rndc, dig, date) load libfaketime fresh
+    on every invocation — and they all see @TIMESTAMP, never
+    @TIMESTAMP + elapsed. This breaks TSIG (rndc signs at the static
+    scenario-start time; named rejects with "clock skew").
+
+    Fix: rewrite the rc file at `tick_interval` real seconds with the
+    current virtual_now. Short-lived processes then always see a
+    fresh anchor. named re-reads on its cache_duration and re-anchors
+    — the math stays consistent because we write what named's
+    virtual_now would have been at the moment of the write.
+    """
+
+    def __init__(self, rc_path: pathlib.Path, start: dt.datetime, speed: float,
+                 tick_interval: float = 0.5):
         self.rc_path = rc_path
         self.rc_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
         self.segment = TimeSegment(
             fake_start=start, real_anchor=time.time(), speed=speed
         )
         self._write()
+        self._tick_interval = tick_interval
+        self._stop = threading.Event()
+        self._ticker = threading.Thread(target=self._tick_loop, daemon=True)
+        self._ticker.start()
 
     def _write(self) -> None:
         # Atomic replace so BIND never reads a half-written file.
@@ -85,26 +109,52 @@ class VirtualClock:
         tmp.write_text(self.segment.to_faketime_line())
         tmp.replace(self.rc_path)
 
+    def _refresh_file(self) -> None:
+        """Rewrite the rc file anchoring @TIMESTAMP at the CURRENT virtual
+        time. This keeps short-lived rndc/dig invocations' TSIG signatures
+        close to named's own virtual clock."""
+        with self._lock:
+            now_virtual = self.segment.virtual_now()
+            self.segment = TimeSegment(
+                fake_start=now_virtual,
+                real_anchor=time.time(),
+                speed=self.segment.speed,
+            )
+            self._write()
+
+    def _tick_loop(self) -> None:
+        while not self._stop.wait(self._tick_interval):
+            try:
+                self._refresh_file()
+            except Exception:
+                pass  # never let the ticker die
+
+    def stop(self) -> None:
+        self._stop.set()
+
     def set_speed(self, new_speed: float) -> None:
-        # Anchor the current virtual instant, then change speed.
-        now_virtual = self.segment.virtual_now()
-        self.segment = TimeSegment(
-            fake_start=now_virtual, real_anchor=time.time(), speed=new_speed
-        )
-        self._write()
+        with self._lock:
+            # Anchor the current virtual instant, then change speed.
+            now_virtual = self.segment.virtual_now()
+            self.segment = TimeSegment(
+                fake_start=now_virtual, real_anchor=time.time(), speed=new_speed
+            )
+            self._write()
 
     def jump_to(self, virtual_target: dt.datetime) -> None:
         """Discontinuously move virtual time forward. Use sparingly —
         this hides any bug that depends on timers firing in sequence."""
-        self.segment = TimeSegment(
-            fake_start=virtual_target,
-            real_anchor=time.time(),
-            speed=self.segment.speed,
-        )
-        self._write()
+        with self._lock:
+            self.segment = TimeSegment(
+                fake_start=virtual_target,
+                real_anchor=time.time(),
+                speed=self.segment.speed,
+            )
+            self._write()
 
     def virtual_now(self) -> dt.datetime:
-        return self.segment.virtual_now()
+        with self._lock:
+            return self.segment.virtual_now()
 
     def wait_until(self, virtual_target: dt.datetime,
                    on_tick: Optional[Callable[[dt.datetime], None]] = None,
@@ -128,29 +178,46 @@ class VirtualClock:
 # ---------------------------------------------------------------------------
 
 class BindController:
-    """Wraps rndc / dig / log-tail. All calls run at real wall time; we
-    never LD_PRELOAD libfaketime into these clients because their own
-    socket timeouts would then be scaled and misbehave."""
+    """Wraps rndc / dig / log-tail.
 
-    def __init__(self, host: str, rndc_port: int, dns_port: int,
-                 rndc_key: pathlib.Path, log_dir: pathlib.Path):
-        self.host = host
-        self.rndc_port = rndc_port
-        self.dns_port = dns_port
-        self.rndc_key = rndc_key
+    rndc and dig are run INSIDE the BIND container so they see the same
+    faked virtual time BIND does — otherwise rndc's TSIG signatures are
+    rejected with "clock skew" (host is at real time ~2026-04, BIND is
+    at virtual time ~2026-01-01 + elapsed).
+
+    The container's entrypoint only sets LD_PRELOAD for named itself,
+    not for exec'd shells (so debugging via `docker exec` is ergonomic).
+    We therefore set LD_PRELOAD explicitly here when exec'ing rndc/dig.
+
+    Note: under libfaketime, socket timeouts scale with the speed
+    multiplier (rndc's gettimeofday returns virtual time, so "10 real
+    seconds" becomes "10 virtual seconds = 10/speed real seconds").
+    We compensate by passing a generous timeout multiplied by speed."""
+
+    def __init__(self, container: str, rndc_key_in_container: str,
+                 faketime_lib: str, log_dir: pathlib.Path,
+                 dns_host: str = "127.0.0.1", dns_port: int = 53):
+        self.container = container
+        self.rndc_key = rndc_key_in_container
+        self.faketime_lib = faketime_lib
         self.log_dir = log_dir
+        self.dns_host = dns_host
+        self.dns_port = dns_port
 
-    def rndc(self, *args: str, timeout: float = 10.0, retries: int = 0) -> str:
-        cmd = [
-            "rndc", "-s", self.host, "-p", str(self.rndc_port),
-            "-k", str(self.rndc_key), *args,
+    def _exec(self, *cmd: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+        full = [
+            "docker", "compose", "exec", "-T",
+            "-e", f"LD_PRELOAD={self.faketime_lib}",
+            self.container, *cmd,
         ]
+        return subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+
+    def rndc(self, *args: str, timeout: float = 30.0, retries: int = 0) -> str:
+        cmd = ("rndc", "-k", self.rndc_key, *args)
         last_err = None
         for attempt in range(1 + retries):
             try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=timeout
-                )
+                result = self._exec(*cmd, timeout=timeout)
                 if result.returncode != 0:
                     raise RuntimeError(
                         f"rndc failed ({result.returncode}): {result.stderr.strip()}"
@@ -162,13 +229,11 @@ class BindController:
                     time.sleep(1)
         raise last_err  # type: ignore[misc]
 
-    def dig(self, qname: str, qtype: str, timeout: float = 5.0) -> str:
-        cmd = [
-            "dig", f"@{self.host}", "-p", str(self.dns_port),
+    def dig(self, qname: str, qtype: str, timeout: float = 15.0) -> str:
+        result = self._exec(
+            "dig", f"@{self.dns_host}", "-p", str(self.dns_port),
             "+dnssec", "+multiline", "+norecurse", qname, qtype,
-        ]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
+            timeout=timeout,
         )
         return result.stdout
 
@@ -489,11 +554,13 @@ def main(argv: list[str]) -> int:
     p.add_argument("scenario", type=pathlib.Path)
     p.add_argument("--rc", type=pathlib.Path,
                    default=pathlib.Path("runtime/faketime.rc"))
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--rndc-port", type=int, default=19953)
-    p.add_argument("--dns-port",  type=int, default=15353)
-    p.add_argument("--rndc-key", type=pathlib.Path,
-                   default=pathlib.Path("runtime/rndc.key"))
+    p.add_argument("--container", default="bind-auth",
+                   help="docker compose service name of the BIND container")
+    p.add_argument("--rndc-key-in-container", default="/etc/bind/rndc.key",
+                   help="path to rndc.key INSIDE the container")
+    p.add_argument("--faketime-lib",
+                   default="/opt/faketime/lib/faketime/libfaketimeMT.so.1",
+                   help="path to libfaketimeMT.so.1 INSIDE the container")
     p.add_argument("--log-dir", type=pathlib.Path,
                    default=pathlib.Path("runtime/bind-logs"))
     p.add_argument("--timeline", type=pathlib.Path,
@@ -509,20 +576,23 @@ def main(argv: list[str]) -> int:
 
     clock = VirtualClock(args.rc, start=start, speed=speed)
     bind = BindController(
-        host=args.host, rndc_port=args.rndc_port, dns_port=args.dns_port,
-        rndc_key=args.rndc_key, log_dir=args.log_dir,
+        container=args.container,
+        rndc_key_in_container=args.rndc_key_in_container,
+        faketime_lib=args.faketime_lib,
+        log_dir=args.log_dir,
     )
     timeline = TimelineLog(args.timeline)
 
     # Wait for BIND to come up (real-time).
     for attempt in range(60):
         try:
-            bind.rndc("status", timeout=3)
+            bind.rndc("status", timeout=10)
             break
         except Exception:
             time.sleep(1)
     else:
         print("BIND did not become reachable in 60s", file=sys.stderr)
+        clock.stop()
         return 1
 
     runner = ScenarioRunner(scenario, clock, bind, timeline)
@@ -530,7 +600,9 @@ def main(argv: list[str]) -> int:
         runner.run()
     except AssertionError as e:
         print(f"SCENARIO FAILED: {e}", file=sys.stderr)
+        clock.stop()
         return 2
+    clock.stop()
     return 0
 
 

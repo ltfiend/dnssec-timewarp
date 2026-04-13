@@ -1,0 +1,26 @@
+# Quick smoke test — verifies the whole pipeline works end-to-end.
+# Should complete in ~30 real seconds at x60.
+
+zone: example.test
+start: 2026-01-01T00:00:00
+speed: 60
+
+observe:
+  every: 10m
+
+steps:
+  - after: 5m
+    description: "Zone comes up signed"
+    assert: zone_signed
+
+  - after: 10m
+    description: "KSK is actively signing"
+    assert: ksk_active
+
+  - after: 10m
+    description: "ZSK is actively signing"
+    assert: zsk_active
+
+  - after: 5m
+    snapshot: true
+    description: "Final snapshot"

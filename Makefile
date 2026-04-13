@@ -4,7 +4,7 @@
 RUNTIME := runtime
 SCENARIO ?= scenarios/ksk-rollover.yaml
 
-.PHONY: init build up down run logs shell clean timeline
+.PHONY: init build up down run logs shell clean timeline rndc
 
 init:
 	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs observations
@@ -24,7 +24,8 @@ build:
 up: init build
 	docker compose up -d
 	@echo "BIND auth:  dig @127.0.0.1 -p 15353 example.test SOA +dnssec"
-	@echo "rndc:       rndc -s 127.0.0.1 -p 19953 -k $(RUNTIME)/rndc.key status"
+	@echo "rndc runs INSIDE the container (for TSIG clock sync):"
+	@echo "            make rndc ARGS='status'"
 
 down:
 	docker compose down
@@ -37,6 +38,9 @@ logs:
 
 shell:
 	docker compose exec bind-auth bash
+
+rndc:
+	docker compose exec -e LD_PRELOAD=/opt/faketime/lib/faketime/libfaketimeMT.so.1 bind-auth rndc -k /etc/bind/rndc.key $(ARGS)
 
 timeline:
 	python3 tools/timeline.py
