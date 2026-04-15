@@ -7,10 +7,13 @@ SCENARIO ?= scenarios/ksk-rollover.yaml
 .PHONY: init build up down run logs shell clean timeline rndc
 
 init:
-	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs observations
+	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs $(RUNTIME)/clock observations
 	# A placeholder faketime.rc so the container's entrypoint can start;
 	# orchestrator will overwrite it with the scenario's start time.
-	echo "@2026-01-01 00:00:00 x1" > $(RUNTIME)/faketime.rc
+	# The file lives in $(RUNTIME)/clock/ and that whole directory is
+	# bind-mounted to /opt/lab/ inside the container — directory mounts
+	# survive in-place writes (single-file mounts do not, see compose).
+	echo "@2026-01-01 00:00:00 x1" > $(RUNTIME)/clock/faketime.rc
 	# rndc key shared between orchestrator (on host) and BIND (in container).
 	test -f $(RUNTIME)/rndc.key || \
 	    docker run --rm -v $(PWD)/$(RUNTIME):/out debian:bookworm-slim \

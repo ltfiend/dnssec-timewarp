@@ -104,10 +104,23 @@ class VirtualClock:
         self._ticker.start()
 
     def _write(self) -> None:
-        # Atomic replace so BIND never reads a half-written file.
-        tmp = self.rc_path.with_suffix(".rc.tmp")
-        tmp.write_text(self.segment.to_faketime_line())
-        tmp.replace(self.rc_path)
+        # In-place truncate+write — DO NOT use atomic rename here.
+        #
+        # The rc file is bind-mounted into the BIND container. With
+        # single-file bind mounts, Docker pins the container's view to
+        # the inode that existed at container-start time. An atomic
+        # rename (write-tmp + replace) creates a NEW inode at the host
+        # path, which the container can never see — its mount stays
+        # stuck on the original (now orphaned) inode.
+        #
+        # Even when we mount a directory instead of a single file,
+        # in-place writes are still simpler and safe: the line we write
+        # is well under PIPE_BUF (4096 bytes), so the write() syscall
+        # is atomic at the kernel level — BIND will never see a
+        # half-written file.
+        line = self.segment.to_faketime_line()
+        with self.rc_path.open("w") as f:
+            f.write(line)
 
     def _refresh_file(self) -> None:
         """Rewrite the rc file anchoring @TIMESTAMP at the CURRENT virtual
@@ -553,7 +566,7 @@ def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("scenario", type=pathlib.Path)
     p.add_argument("--rc", type=pathlib.Path,
-                   default=pathlib.Path("runtime/faketime.rc"))
+                   default=pathlib.Path("runtime/clock/faketime.rc"))
     p.add_argument("--container", default="bind-auth",
                    help="docker compose service name of the BIND container")
     p.add_argument("--rndc-key-in-container", default="/etc/bind/rndc.key",

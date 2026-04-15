@@ -1,6 +1,6 @@
 services:
   bind-auth:
-    build: ./docker/bind
+    image: registry.devries.tv/nojem-bind:latest
     container_name: dnssec-lab-auth
     networks:
       lab:
@@ -11,7 +11,16 @@ services:
       - "19953:953/tcp"   # rndc from orchestrator
     volumes:
       # Shared faketime config — orchestrator writes, BIND reads.
-      - ./runtime/faketime.rc:/opt/lab/faketime.rc:ro
+      #
+      # CRITICAL: this MUST be a directory bind mount, not a single-file
+      # bind mount. Single-file bind mounts pin the container's view to
+      # the inode at container-start time, so updates from the host never
+      # reach BIND if the file is replaced via atomic rename. Mounting
+      # the parent directory makes the path re-resolve dynamically inside
+      # the container, which works with both in-place writes and renames.
+      # Keeping the rc file in its own subdir (./runtime/clock/) keeps
+      # the rest of ./runtime/ from leaking into /opt/lab/.
+      - ./runtime/clock:/opt/lab
       # Zone data and key state files, so we can inspect them from the host.
       - ./runtime/bind-data:/var/lib/bind
       - ./runtime/bind-logs:/var/log/bind
