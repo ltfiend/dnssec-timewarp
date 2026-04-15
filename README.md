@@ -13,9 +13,16 @@ BIND 9 runs inside a container with `libfaketimeMT.so` injected via
     virtual_now = fake_start + (real_now - real_anchor) * speed
 
 The `fake_start`, `real_anchor`, and `speed` live in a single config file
-(`runtime/faketime.rc`) that the orchestrator writes and BIND reads
+(`runtime/clock/faketime.rc`) that the orchestrator writes and BIND reads
 through a bind mount. libfaketime caches the config for 1 real second
 (`FAKETIME_CACHE_DURATION=1`), so changes propagate within a second.
+
+The mount is a **directory** (`./runtime/clock` → `/opt/lab`), not a
+single-file mount. Single-file bind mounts in Docker pin the
+container's view to the inode at container-start time — any update on
+the host that changes the inode (atomic rename) or even some in-place
+modification patterns can fail to reach the container, and BIND would
+silently keep reading the original `make init` placeholder.
 
 The orchestrator also runs a background "ticker" thread that rewrites
 `faketime.rc` every 0.5 real seconds, re-anchoring `@TIMESTAMP` at the
@@ -246,12 +253,32 @@ before printing its banner. Verify you built *with* `--without-jemalloc`:
 head -3` should show the configure line including `'--without-jemalloc'`.
 
 **`rndc: connection to remote host closed ... clocks are not
-synchronized`.**
-TSIG skew. Either you're running rndc from the host over TCP (don't —
-use `make rndc ARGS='…'` or `docker compose exec`), or the orchestrator's
-ticker isn't updating `runtime/faketime.rc`. Check that the mtime of
-that file is within the last second:
-`stat -c '%Y %n' runtime/faketime.rc; date +%s`.
+synchronized`** *(or named log shows `invalid command from … : expired`
+or `: clock skew`)*.
+TSIG skew. Three possible causes:
+
+1. **You're running rndc from the host over TCP** — don't. Use
+   `make rndc ARGS='…'` or `docker compose exec`. Host rndc has no
+   libfaketime, so it signs with real time (~2026-04) while BIND
+   validates against virtual time (~2026-01).
+
+2. **Stale bind mount.** If you have an older checkout where
+   `docker-compose.yml` mounts `./runtime/faketime.rc` as a single
+   file (instead of `./runtime/clock` as a directory), the
+   container's view of the file is pinned to the inode at
+   container-start time and the orchestrator's writes never reach
+   BIND. Diagnostic:
+   ```
+   echo "host inode:      $(stat -c '%i' runtime/clock/faketime.rc)"
+   echo "container inode: $(docker compose exec -T bind-auth stat -c '%i' /opt/lab/faketime.rc)"
+   ```
+   These MUST match. If they don't, `docker compose down` and bring
+   the container back up — and make sure you're on the directory-
+   mount version of the compose file.
+
+3. **Orchestrator ticker isn't running.** `runtime/clock/faketime.rc`
+   should have a sub-second-old mtime while the orchestrator is
+   running: `stat -c '%Y %n' runtime/clock/faketime.rc; date +%s`.
 
 **`named.conf:41: undefined category: 'dnssec-policy'`.**
 You're on BIND < 9.19. The `dnssec-policy` log category was split out
