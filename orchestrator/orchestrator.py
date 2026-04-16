@@ -477,11 +477,14 @@ class ScenarioRunner:
             self._check_assertion(assertion)
 
         if step.get("snapshot"):
-            self.record("snapshot", {
-                "status": self.bind.dnssec_status(self.zone),
-                "dnskey": self.bind.dig(self.zone, "DNSKEY"),
-                "cds": self.bind.dig(self.zone, "CDS"),
-            })
+            try:
+                self.record("snapshot", {
+                    "status": self.bind.dnssec_status(self.zone),
+                    "dnskey": self.bind.dig(self.zone, "DNSKEY"),
+                    "cds": self.bind.dig(self.zone, "CDS"),
+                })
+            except Exception as e:
+                self.record("snapshot_error", str(e))
 
     def _perform_action(self, action: str, step: dict) -> None:
         if action == "ds_published":
