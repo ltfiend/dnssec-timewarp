@@ -4,7 +4,7 @@
 RUNTIME := runtime
 SCENARIO ?= scenarios/ksk-rollover.yaml
 
-.PHONY: init build up down run logs shell clean timeline rndc time
+.PHONY: init build up down run logs shell clean timeline rndc time sync freeze
 
 init:
 	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs $(RUNTIME)/clock observations
@@ -45,13 +45,22 @@ shell:
 rndc:
 	docker compose exec -e LD_PRELOAD=/opt/faketime/lib/faketime/libfaketimeMT.so.1 bind-auth rndc -k /etc/bind/rndc.key $(ARGS)
 
-# Show the current virtual time as an in-container short-lived process
-# would compute it, plus the orchestrator's last-written anchor + speed.
+# Show the rc file state vs named's actual virtual_now, and warn if
+# they've drifted apart (which happens after the orchestrator dies and
+# named keeps projecting forward at scaled speed while the file freezes).
 time:
-	@printf 'rc file   : %s\n' "$$(cat $(RUNTIME)/clock/faketime.rc)"
-	@printf 'mtime     : %s\n' "$$(stat -c '%y' $(RUNTIME)/clock/faketime.rc)"
-	@printf 'virtual   : '
-	@docker compose exec -T -e LD_PRELOAD=/opt/faketime/lib/faketime/libfaketimeMT.so.1 bind-auth date -u '+%Y-%m-%d %H:%M:%S UTC'
+	@python3 tools/sync_clock.py --check || true
+
+# Pull the rc file forward to match named's current virtual_now.
+# Preserves named's accumulated DNSSEC state — use this instead of
+# restarting the container whenever you want to recover from drift.
+sync:
+	@python3 tools/sync_clock.py
+
+# Same as sync, but also drops speed to x1 (real time) afterward so
+# named effectively stops marching forward. Use to inspect state.
+freeze:
+	@python3 tools/sync_clock.py --freeze
 
 timeline:
 	python3 tools/timeline.py
