@@ -10,7 +10,7 @@
 
 zone: example.test
 start: 2026-01-01T00:00:00
-speed: 600
+speed: 500
 
 observe:
   every: 15m   # virtual — sample state every 15 virtual minutes
@@ -40,7 +40,7 @@ steps:
 
   # Slow down to watch the new ZSK appear and the old one retire.
   - after: 0d
-    speed: 10
+    speed: 100
     description: "Slow to 10x to watch the ZSK rollover"
 
   - after: 4d
@@ -53,8 +53,8 @@ steps:
 
   # Speed back up and run past a second rollover cycle.
   - after: 0d
-    speed: 120
-    description: "Speed back up to 120x"
+    speed: 500
+    description: "Speed back up to 900x"
 
   - after: 30d
     description: "Second ZSK rollover cycle complete"
