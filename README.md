@@ -228,6 +228,34 @@ Available `do:` actions: `ds_published`, `ds_withdrawn`, `rollover_ksk`,
 | ZSK rollover | `scenarios/zsk-rollover.yaml` | Automatic ZSK rotation (no DS involvement) | ~8.5h @ x120 |
 | Manual rollover | `scenarios/manual-rollover.yaml` | Operator-triggered KSK roll, DS publish/withdraw | ~3.5h @ x100 |
 
+## Simulation speed
+
+Real time to simulate a given virtual duration at various speed
+multipliers:
+
+| speed | 30 v-days | 90 v-days | 180 v-days | 270 v-days | 360 v-days |
+|-------|-----------|-----------|------------|------------|------------|
+| x10   | 3.0 d     | 9.0 d     | 18.0 d     | 27.0 d     | 36.0 d     |
+| x60   | 12.0 h    | 36.0 h    | 3.0 d      | 4.5 d      | 6.0 d      |
+| x100  | 7.2 h     | 21.6 h    | 43.2 h     | 2.7 d      | 3.6 d      |
+| x300  | 2.4 h     | 7.2 h     | 14.4 h     | 21.6 h     | 28.8 h     |
+| x600  | 1.2 h     | 3.6 h     | 7.2 h      | 10.8 h     | 14.4 h     |
+| x1000 | 43 min    | 2.2 h     | 4.3 h      | 6.5 h      | 8.6 h      |
+
+Fidelity bands, briefly:
+
+- **x10–x100** — all fidelity qualities hold, no heartbeat drops.
+- **x100–x300** — still clean; good default for research runs.
+- **x300–x600** — works, expect occasional heartbeat drops and
+  assertion-timing slip of a few virtual minutes.
+- **x600+** — demo mode; state machine advances but samples are
+  unreliable.
+
+See [SPEED.md](SPEED.md) for the underlying real-time windows (TSIG
+fudge, ticker interval, libfaketime cache, docker-exec overhead), what
+breaks first at each multiplier, and which knobs are available vs
+would need code changes.
+
 ## Analyzing results
 
 After a run completes, `observations/timeline.jsonl` contains every
