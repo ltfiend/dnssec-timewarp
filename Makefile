@@ -4,7 +4,7 @@
 RUNTIME := runtime
 SCENARIO ?= scenarios/ksk-rollover.yaml
 
-.PHONY: init build up down run logs shell clean timeline rndc
+.PHONY: init build up down run logs shell clean timeline rndc time
 
 init:
 	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs $(RUNTIME)/clock observations
@@ -44,6 +44,14 @@ shell:
 
 rndc:
 	docker compose exec -e LD_PRELOAD=/opt/faketime/lib/faketime/libfaketimeMT.so.1 bind-auth rndc -k /etc/bind/rndc.key $(ARGS)
+
+# Show the current virtual time as an in-container short-lived process
+# would compute it, plus the orchestrator's last-written anchor + speed.
+time:
+	@printf 'rc file   : %s\n' "$$(cat $(RUNTIME)/clock/faketime.rc)"
+	@printf 'mtime     : %s\n' "$$(stat -c '%y' $(RUNTIME)/clock/faketime.rc)"
+	@printf 'virtual   : '
+	@docker compose exec -T -e LD_PRELOAD=/opt/faketime/lib/faketime/libfaketimeMT.so.1 bind-auth date -u '+%Y-%m-%d %H:%M:%S UTC'
 
 timeline:
 	python3 tools/timeline.py
