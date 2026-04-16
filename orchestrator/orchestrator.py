@@ -251,24 +251,24 @@ class BindController:
         return result.stdout
 
     def dnssec_status(self, zone: str) -> str:
-        return self.rndc("dnssec", "-status", zone)
+        return self.rndc("dnssec", "-status", zone, retries=3)
 
     def checkds_published(self, zone: str, when: Optional[str] = None) -> str:
         args = ["dnssec", "-checkds"]
         if when:
             args += ["-when", when]
         args += ["published", zone]
-        return self.rndc(*args)
+        return self.rndc(*args, retries=3)
 
     def checkds_withdrawn(self, zone: str, when: Optional[str] = None) -> str:
         args = ["dnssec", "-checkds"]
         if when:
             args += ["-when", when]
         args += ["withdrawn", zone]
-        return self.rndc(*args)
+        return self.rndc(*args, retries=3)
 
     def rollover(self, zone: str, key_id: int) -> str:
-        return self.rndc("dnssec", "-rollover", "-key", str(key_id), zone)
+        return self.rndc("dnssec", "-rollover", "-key", str(key_id), zone, retries=3)
 
     def parse_dnssec_status(self, raw: str) -> list[dict[str, Any]]:
         """Turn rndc dnssec -status into structured key records.
