@@ -31,6 +31,7 @@ import argparse
 import dataclasses
 import datetime as dt
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -104,23 +105,20 @@ class VirtualClock:
         self._ticker.start()
 
     def _write(self) -> None:
-        # In-place truncate+write — DO NOT use atomic rename here.
-        #
-        # The rc file is bind-mounted into the BIND container. With
-        # single-file bind mounts, Docker pins the container's view to
-        # the inode that existed at container-start time. An atomic
-        # rename (write-tmp + replace) creates a NEW inode at the host
-        # path, which the container can never see — its mount stays
-        # stuck on the original (now orphaned) inode.
-        #
-        # Even when we mount a directory instead of a single file,
-        # in-place writes are still simpler and safe: the line we write
-        # is well under PIPE_BUF (4096 bytes), so the write() syscall
-        # is atomic at the kernel level — BIND will never see a
-        # half-written file.
-        line = self.segment.to_faketime_line()
-        with self.rc_path.open("w") as f:
-            f.write(line)
+        # In-place overwrite — DO NOT use atomic rename (breaks bind
+        # mounts) or open("w") (truncates to 0 before writing, so a
+        # concurrent reader sees an empty file → libfaketime parse
+        # error). Instead: open for write without truncation, write
+        # the new line from offset 0, THEN ftruncate to the new
+        # length. The reader always sees either old valid content or
+        # new valid content, never an empty file.
+        line = self.segment.to_faketime_line().encode()
+        fd = os.open(str(self.rc_path), os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line)
+            os.ftruncate(fd, len(line))
+        finally:
+            os.close(fd)
 
     def _refresh_file(self) -> None:
         """Rewrite the rc file anchoring @TIMESTAMP at the CURRENT virtual
