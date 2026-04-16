@@ -2,3 +2,5 @@ runtime/
 observations/*.jsonl
 __pycache__/
 *.pyc
+.claude
+PROMPTS.md
