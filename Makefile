@@ -7,7 +7,7 @@ SCENARIO ?= scenarios/ksk-rollover.yaml
 .PHONY: init build up down run logs shell clean timeline rndc time sync freeze
 
 init:
-	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-logs $(RUNTIME)/clock observations
+	mkdir -p $(RUNTIME)/bind-data $(RUNTIME)/bind-data/dynamic-zones $(RUNTIME)/bind-logs $(RUNTIME)/clock observations
 	# A placeholder faketime.rc so the container's entrypoint can start;
 	# orchestrator will overwrite it with the scenario's start time.
 	# The file lives in $(RUNTIME)/clock/ and that whole directory is

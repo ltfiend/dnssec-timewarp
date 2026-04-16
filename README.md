@@ -200,6 +200,7 @@ runtime observations` as an escape hatch.
 
 ```yaml
 zone: example.test
+dnssec_policy: lab-fast     # optional — defaults to lab-fast
 start: 2026-01-01T00:00:00
 speed: 60                   # virtual seconds per real second
 observe:
@@ -214,6 +215,19 @@ steps:
   - at: 2026-02-15T00:00:00 # absolute virtual time
     snapshot: true
 ```
+
+Any `zone:` value works. If the named zone doesn't already exist in
+BIND, the orchestrator auto-creates it on scenario start via `rndc
+addzone`, using a minimal SOA + NS + 2× A-record template. The static
+`example.test` declared in `docker/bind/named.conf` is unaffected.
+
+`dnssec_policy:` selects which policy block to attach to an
+auto-created zone (default `lab-fast`). Defining new policies is a
+manual edit to `docker/bind/named.conf` followed by
+`docker compose build`. If a scenario names a policy that isn't
+defined, the orchestrator surfaces a clear error and refuses to
+proceed. (For zones that already exist, this field is informational
+only — BIND keeps whatever policy the zone was created with.)
 
 Available `do:` actions: `ds_published`, `ds_withdrawn`, `rollover_ksk`,
 `rollover_zsk`, `reload`. Available `assert:` checks: `zone_signed`,

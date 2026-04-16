@@ -184,6 +184,20 @@ class VirtualClock:
                 on_tick(self.virtual_now())
 
 
+_ZONE_FILE_TEMPLATE = """\
+$TTL 3600
+@   IN SOA  ns1.{zone}. hostmaster.{zone}. (
+            {serial} ; serial
+            3600       ; refresh
+            900        ; retry
+            1209600    ; expire
+            3600 )     ; negative TTL
+    IN NS   ns1.{zone}.
+ns1 IN A    127.0.0.1
+www IN A    192.0.2.1
+"""
+
+
 # ---------------------------------------------------------------------------
 # Talking to BIND (at real speed — NOT under faketime)
 # ---------------------------------------------------------------------------
@@ -267,6 +281,62 @@ class BindController:
 
     def rollover(self, zone: str, key_id: int) -> str:
         return self.rndc("dnssec", "-rollover", "-key", str(key_id), zone, retries=3)
+
+    def ensure_zone(self, zone: str, policy: str, serial: str) -> str:
+        """Ensure `zone` exists in BIND, creating it via rndc addzone if
+        not. Returns one of: "exists", "created".
+
+        Raises RuntimeError if the requested dnssec-policy isn't defined
+        in named.conf (or for any other unhandled rndc failure).
+        Idempotent — re-running on an existing zone returns "exists"."""
+        # Write the zone file inside the container (avoids host-vs-container
+        # uid/perm mismatch on the runtime/bind-data bind mount). _exec
+        # doesn't take stdin, so this is a direct docker compose exec call.
+        body = _ZONE_FILE_TEMPLATE.format(zone=zone, serial=serial)
+        proc = subprocess.run(
+            ["docker", "compose", "exec", "-T",
+             self.container, "sh", "-c",
+             f"cat > /var/lib/bind/{zone}.db"],
+            input=body, capture_output=True, text=True, timeout=15.0,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.lower()
+            if "read-only file system" in err:
+                # The zone file path is bind-mounted read-only from the
+                # host — meaning this is a statically declared zone
+                # (e.g., example.test). It's already known to BIND, so
+                # there's nothing to do.
+                return "exists"
+            raise RuntimeError(
+                f"failed to write zone file for {zone}: {proc.stderr.strip()}"
+            )
+
+        zone_config = (
+            f'{{ type primary; file "/var/lib/bind/{zone}.db"; '
+            f'dnssec-policy "{policy}"; inline-signing yes; }};'
+        )
+        try:
+            self.rndc("addzone", zone, zone_config, retries=2)
+            return "created"
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "already exists" in msg:
+                return "exists"
+            if "configure_zone failed" in msg or "not found" in msg:
+                # Most common cause once the zone file is on disk: the
+                # named dnssec-policy doesn't exist. (BIND's error is
+                # generic — "configure_zone failed: not found" — but
+                # the file write above already succeeded, so the
+                # remaining unknown thing is the policy name.)
+                raise RuntimeError(
+                    f"`rndc addzone {zone}` failed (most likely "
+                    f"dnssec-policy {policy!r} is not defined in "
+                    f"docker/bind/named.conf — add a "
+                    f"`dnssec-policy {policy!r} {{ ... }}` block and "
+                    f"`docker compose down && docker compose up -d`). "
+                    f"Raw rndc error: {e}"
+                ) from e
+            raise
 
     def parse_dnssec_status(self, raw: str) -> list[dict[str, Any]]:
         """Turn rndc dnssec -status into structured key records.
@@ -400,6 +470,7 @@ class ScenarioRunner:
         self.bind = bind
         self.timeline = timeline
         self.zone = scenario["zone"]
+        self.dnssec_policy = scenario.get("dnssec_policy", "lab-fast")
 
         obs_cfg = scenario.get("observe", {})
         self.obs_interval = _parse_duration(
@@ -446,9 +517,19 @@ class ScenarioRunner:
     def run(self) -> None:
         self.record("scenario_start", {
             "zone": self.zone,
+            "dnssec_policy": self.dnssec_policy,
             "start": self.clock.virtual_now().isoformat(),
             "speed": self.clock.segment.speed,
         })
+        # Make sure the zone exists in BIND (auto-create if not).
+        # Serial is YYYYMMDD01 derived from the scenario start so that
+        # re-runs produce a stable file content.
+        serial = self.clock.segment.fake_start.strftime("%Y%m%d") + "01"
+        outcome = self.bind.ensure_zone(self.zone, self.dnssec_policy, serial)
+        self.record(
+            "zone_provisioned" if outcome == "created" else "zone_exists",
+            {"zone": self.zone, "dnssec_policy": self.dnssec_policy},
+        )
         for i, step in enumerate(self.scenario.get("steps", [])):
             self._run_step(i, step)
         self.record("scenario_end", "complete")

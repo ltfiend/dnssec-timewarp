@@ -34,7 +34,7 @@ steps:
   # Fast-forward through the first ~25 days.  The ZSK was generated at
   # startup with a 30-day lifetime, so we expect pre-publish of the
   # successor around day 25-27.
-  - after: 24d
+  - after: 26d
     description: "Approaching ZSK rollover — two ZSKs should appear soon"
     snapshot: true
 
@@ -43,11 +43,11 @@ steps:
     speed: 100
     description: "Slow to 10x to watch the ZSK rollover"
 
-  - after: 4d
+  - after: 2d
     description: "New ZSK should be published (pre-publish phase)"
     assert: two_zsks_present
 
-  - after: 3d
+  - after: 2d
     description: "Old ZSK should be removed, back to one active ZSK"
     snapshot: true
 
