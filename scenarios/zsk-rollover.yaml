@@ -10,7 +10,7 @@
 
 zone: example.test
 start: 2026-01-01T00:00:00
-speed: 120
+speed: 600
 
 observe:
   every: 15m   # virtual — sample state every 15 virtual minutes

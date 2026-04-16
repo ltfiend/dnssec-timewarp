@@ -54,7 +54,7 @@ builds v0.9.11+ from source.
 ## Architecture
 
 ```
-host: orchestrator.py  ──writes──►  runtime/faketime.rc
+host: orchestrator.py  ──writes──►  runtime/clock/faketime.rc
       (real time)                      │
          │                             │ (bind mount)
          │                             ▼
@@ -98,7 +98,7 @@ Each step explains what should happen so you can tell where it fails.
 
 ```bash
 # 1. Create runtime directories and a placeholder faketime.rc + rndc.key.
-#    `make init` writes runtime/faketime.rc, and pulls a throwaway Debian
+#    `make init` writes runtime/clock/faketime.rc, and pulls a throwaway Debian
 #    container just to run `rndc-confgen` so the key format matches what
 #    the in-container rndc expects.
 make init
@@ -156,6 +156,25 @@ Live output during a run shows every key-state transition keyed by virtual
 time. Full timeline lands in `observations/timeline.jsonl` for post-hoc
 analysis.
 
+## Poking at the running BIND
+
+```
+make time                           # current virtual clock state
+make rndc ARGS='status'             # any rndc subcommand
+make rndc ARGS='dnssec -status example.test'
+make shell                          # interactive shell in the container
+dig @127.0.0.1 -p 15353 example.test SOA +dnssec   # from the host
+```
+
+`make rndc` and `make time` run their probes *inside* the container
+with `LD_PRELOAD` set, so they see the same virtual time BIND does —
+which is required for TSIG to succeed. Note that `make rndc` only
+works reliably while the orchestrator is running (its 0.5s ticker
+keeps the anchor fresh enough to satisfy BIND's 300s TSIG fudge); if
+the orchestrator isn't running and named has drifted more than 5
+minutes of virtual time past the rc file's `@TIMESTAMP`, `rndc` will
+hit `clock skew`. Run a scenario (even the smoke one) to resync.
+
 ## Resetting BIND state between runs
 
 BIND writes zone and key state under `runtime/bind-data/` (owned by the
@@ -167,7 +186,7 @@ without sudo. Use a throwaway container instead:
 docker compose down
 docker run --rm -v "$PWD/runtime:/runtime" debian:bookworm-slim \
     sh -c 'rm -rf /runtime/bind-data/* /runtime/bind-logs/*'
-echo "@2026-01-01 00:00:00 x1" > runtime/faketime.rc
+echo "@2026-01-01 00:00:00 x1" > runtime/clock/faketime.rc
 rm -f observations/timeline.jsonl
 docker compose up -d
 ```
